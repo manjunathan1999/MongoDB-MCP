@@ -19,17 +19,6 @@ pymongo>=4.16.0        # sync MongoDB driver (PyMongo)
 # ── Ollama LLM Client ────────────────────────────────────────────
 ollama>=0.6.1          # local + cloud model support
 
-# ── Forecasting ───────────────────────────────────────────────────
-prophet>=1.1.5         # Facebook Prophet time-series forecasting
-pandas>=2.0.0          # data manipulation
-numpy>=1.24.0          # numerical operations
-scikit-learn>=1.3.0    # metrics (MAE, RMSE, MAPE)
-
-# ── Reporting ─────────────────────────────────────────────────────
-matplotlib>=3.7.0      # chart generation (embedded in PDF)
-jinja2>=3.1.0          # HTML report templating
-markdown-pdf>=1.13.0   # Markdown → PDF conversion (replaces WeasyPrint)
-
 # ── Terminal UI ───────────────────────────────────────────────────
 rich>=13.0.0           # colored output, panels, tables, markdown
 prompt-toolkit>=3.0.0  # command history, autocomplete, async prompt
