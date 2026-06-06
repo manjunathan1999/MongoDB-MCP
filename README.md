@@ -16,9 +16,8 @@ A single terminal application that lets you manage MongoDB in plain English usin
 - [Installation](#-installation)
 - [Configuration](#-configuration)
 - [Usage](#-usage)
-- [Session Commands](#-session-commands)
-- [MongoDB Chat — /mongo](#-mongodb-chat----mongo)
-- [MCP Tools Reference](#-mcp-tools-reference-20-tools)
+- [TUI Commands](#-tui-commands)
+- [MCP Tools Reference](#-mcp-tools-reference-25-tools)
 - [Model Recommendations](#-model-recommendations)
 - [Running Tests](#-running-tests)
 - [Dependencies](#-dependencies)
@@ -31,26 +30,27 @@ A single terminal application that lets you manage MongoDB in plain English usin
 ### MongoDB Control (MCP Layer)
 
 - Natural-language MongoDB queries powered by Ollama + FastMCP
-- 20 MCP tools covering every MongoDB operation
+- 25 MCP tools covering common MongoDB administration and data operations
 - Full CRUD, aggregation pipelines, index management, bulk writes
-- Streaming responses, persistent command history, tab-completion
+- Claude Code-style full-screen TUI with a persistent bottom composer
+- Inline tool-call visibility, optional tool arguments, and audit logging
 
-### Documentation Assistant (Main Session)
+### AI Fallback
 
-- Claude Code-style TUI — answers questions strictly from your loaded documentation
-- Load a folder of `.txt`, `.md`, `.pdf`, `.rst` files as the knowledge base
-- Never answers outside the docs — safe, bounded, grounded
-- Routes to `/mongo` when the question is relevant
+- If MongoDB or the MCP server is unavailable, the TUI still answers as a normal Ollama chat assistant
+- Database-specific questions clearly explain that live MongoDB access is unavailable until the connection is fixed
+- `/model` lets you switch between downloaded Ollama models without restarting
 
 ### Why a Hybrid Architecture?
 
 Pure MCP lacks state management, orchestration, and error recovery. This project separates concerns clearly:
 
-| Layer                       | Technology           | Role                               |
-| --------------------------- | -------------------- | ---------------------------------- |
-| **Documentation assistant** | Ollama (doc-bounded) | Answers questions from your docs   |
-| **Intent + routing**        | Ollama LLM           | Parses natural language            |
-| **Data access**             | FastMCP + Motor      | MongoDB reads/writes via MCP tools |
+| Layer             | Technology      | Role                                      |
+| ----------------- | --------------- | ----------------------------------------- |
+| **Terminal TUI**  | Textual         | Chat layout, commands, model picker       |
+| **LLM runtime**   | Ollama          | Normal chat + MongoDB tool-use reasoning  |
+| **MCP server**    | FastMCP + Motor | MongoDB reads/writes via registered tools |
+| **Audit logging** | JSONL logs      | Records MCP tool calls and outcomes       |
 
 ---
 
@@ -59,20 +59,12 @@ Pure MCP lacks state management, orchestration, and error recovery. This project
 ```
 python main.py
       │
-      │  (doc-bounded TUI — answers from loaded docs)
-      │  /mongo ──────────────────────────────────────────────────────────┐
-      │  /clear, /help, /exit                                             │
-      │                                                                   ▼
-      │                                                            MongoDBMCPClient
-      │                                                            (Ollama: tool-use)
-      │                                                                   │
-      │                                                                   ▼
-      │                                                             FastMCP Server
-      │                                                             (20 MCP tools)
-      │                                                                   │
-      │                                                                   ▼
-      │                                                                MongoDB
-      └───────────────────────────────────────────────────────────────────┘
+      ▼
+Textual TUI  ── /model, /help, /clear, /reset
+      │
+      ├── MongoDB connected ──► Ollama tool-use loop ──► FastMCP Server ──► MongoDB
+      │
+      └── MongoDB offline ────► Ollama normal chat fallback
 ```
 
 ---
@@ -82,30 +74,36 @@ python main.py
 ```
 mongodb-mcp-controller/
 │
-├── main.py                          # Single entry point — doc-bounded TUI + slash commands
+├── main.py                          # Single entry point — Textual TUI or MCP server-only mode
 ├── pyproject.toml                   # Project metadata + dependency specs
 ├── requirements.txt                 # pip-installable runtime dependencies
 ├── requirements-dev.txt             # Dev/test dependencies (pytest, ruff)
 ├── .env.example                     # Config template — copy to .env and fill in values
-├── .main_history                    # Auto-created: persistent session command history
 ├── README.md
 │
 ├── config/                          # Application configuration
-│   ├── __init__.py
+│   ├── audit_logger.py              # JSON audit trail for MCP tool calls
 │   └── settings.py                  # Pydantic v2 settings loaded from .env
 │
 ├── mcp_server/                      # FastMCP MongoDB server
 │   ├── __init__.py
-│   └── server.py                    # 20 MCP tools — complete MongoDB control
+│   └── server.py                    # 25 MCP tools — complete MongoDB control
 │
-├── client/                          # MongoDB chat client
-│   ├── __init__.py
-│   └── ollama_client.py             # Ollama agentic REPL
-│                                    # streaming output, /clear, /tools, /history
+├── client/
+│   └── ollama_client.py             # Legacy prompt-toolkit REPL utilities
+│
+├── tui/                             # Claude Code-style Textual UI
+│   ├── app.py                       # Main chat screen, composer, commands, model picker
+│   └── widgets.py                   # Chat message and scroll view widgets
+│
+├── rag/                             # RAG helpers for documentation indexing experiments
+│   └── engine.py
+│
+├── logs/                            # Auto-created app.log and audit.log
 │
 └── tests/                           # Test suite
     ├── __init__.py
-    └── test_server.py               # 11 unit tests — all 20 MCP server tools
+    └── test_server.py               # Unit tests for MCP server behavior
 ```
 
 ---
@@ -170,24 +168,19 @@ All settings live in `.env` (copy from `.env.example`):
 | `MONGODB_URI`        | `mongodb://localhost:27017` | MongoDB connection string           |
 | `MONGODB_DEFAULT_DB` | `admin`                     | Default database                    |
 | `OLLAMA_HOST`        | `http://localhost:11434`    | Ollama API base URL                 |
-| `OLLAMA_MODEL`       | `qwen2.5:7b`                | Model for tool-use + intent parsing |
+| `OLLAMA_MODEL`       | `qwen2.5:7b`                | Startup model for chat + tool use   |
 | `MCP_TRANSPORT`      | `stdio`                     | MCP transport (`stdio` or `sse`)    |
 | `LOG_LEVEL`          | `INFO`                      | Python logging level                |
 | `SHOW_TOOL_ARGS`     | `false`                     | Print MCP tool arguments inline     |
+| `AUDIT_LOG_ENABLED`  | `true`                      | Write MCP tool calls to audit log   |
 
 ---
 
 ## 💻 Usage
 
 ```bash
-# Start with README.md as default documentation
+# Start the full-screen TUI
 python main.py
-
-# Load your own documentation folder
-python main.py --docs ./my_docs/
-
-# Load a single PDF manual
-python main.py --docs product_manual.pdf
 
 # Override model
 python main.py --model qwen2.5:3b
@@ -199,101 +192,55 @@ python main.py --show-tool-args
 python main.py --server-only
 ```
 
-On startup the application loads your documentation, then shows the session prompt:
+On startup the application opens a full-screen terminal UI:
 
 ```
-  🍃  MongoDB MCP Controller
+🍃 MongoDB MCP Controller   model: qwen2.5:7b   db: mongodb://localhost:27017
 
-  Model   : qwen2.5:7b
-  MongoDB : mongodb://localhost:27017
-  DB      : mydb
-  Docs    : 3 files loaded (schema.md, api_guide.pdf, overview.txt)
+Assistant
+Welcome! Connecting to MongoDB MCP server...
 
-  Ask me anything about the project, or type /help to see commands.
-
-──────── Commands ────────
-  /mongo      Enter MongoDB natural-language chat
-  /clear      Clear the terminal screen and scroll-back buffer
-  /help       Show this help message
-  /exit       Quit the application
-
-›
+› Ask anything... MongoDB tools are used when connected
+? for shortcuts · /help for commands · Ctrl+Q to quit
 ```
 
-Any text you type (without a `/`) goes to the **documentation assistant** — strictly bounded to the docs you loaded. It will not answer outside the documentation.
+Ask MongoDB questions in plain English:
 
 ```
-› How does the MCP server work?
-── Assistant ──────────────────────────────
-According to README.md, the fastMCP server exposes
-20 different tools for MongoDB operations...
-
-› What is the capital of France?
-── Assistant ──────────────────────────────
-I can only answer from the provided documentation,
-and I couldn't find information about that there.
+› List all databases
+› Show collections in mydb
+› Count documents in JournalEvents where location is 20
+› Find all events from device 81 today
+› Create a unique index on email field in users
 ```
+
+If MongoDB is not connected, the same input box still works as a normal AI chat. It will not pretend to inspect live database data until the MCP connection is fixed.
 
 ---
 
-## 🔑 Session Commands
+## 🔑 TUI Commands
 
-| Command  | Description                                |
-| -------- | ------------------------------------------ |
-| `/mongo` | Enter MongoDB natural-language chat        |
-| `/clear` | Clear terminal screen + scroll-back buffer |
-| `/help`  | Show the command table                     |
-| `/exit`  | Quit the application                       |
+| Command   | Description                                      |
+| --------- | ------------------------------------------------ |
+| `/help`   | Show available commands and examples             |
+| `/clear`  | Clear the chat view                              |
+| `/reset`  | Clear conversation history                       |
+| `/model`  | List downloaded Ollama models and switch model   |
+| `/models` | Alias for `/model`                               |
 
-The `/mongo` command returns to the main `›` prompt when exited — no need to restart.
-
-`/clear` also works **inside** the `/mongo` chat. After clearing, a compact header is reprinted so you always know which mode you are in.
-
----
-
-## 🗄️ MongoDB Chat — `/mongo`
-
-Type `/mongo` at the `›` prompt to enter the MongoDB chat REPL.
-
-```
-› /mongo
-```
-
-Then query your MongoDB in plain English:
-
-```
-You › List all databases
-You › Show collections in mydb
-You › Count documents in JournalEvents where location is 20
-You › Find all events from device 81 today
-You › Create a unique index on email field in users
-You › Run an aggregation to count events by location
-You › Insert a test document into the orders collection
-```
-
-### Chat Slash Commands (inside `/mongo`)
-
-| Command    | Description                                      |
-| ---------- | ------------------------------------------------ |
-| `/clear`   | Clear the terminal screen and scroll-back buffer |
-| `/help`    | Show all available commands                      |
-| `/tools`   | List all 20 MCP tools with descriptions          |
-| `/model`   | Show current model + connection info             |
-| `/reset`   | Clear conversation history                       |
-| `/history` | Show last 10 queries                             |
-| `/exit`    | Exit mongo mode → return to main `›` prompt      |
+Use `/model` to select from models already downloaded in Ollama. Type the number shown in the list to switch; the top bar updates immediately and the next response uses the selected model.
 
 ### Keyboard Shortcuts
 
-| Key       | Action                                             |
-| --------- | -------------------------------------------------- |
-| `↑` / `↓` | Navigate query history (persists between sessions) |
-| `Tab`     | Autocomplete from history                          |
-| `Ctrl-C`  | Exit immediately                                   |
+| Key      | Action                   |
+| -------- | ------------------------ |
+| `Ctrl+L` | Clear chat               |
+| `Ctrl+Q` | Quit the TUI             |
+| `Escape` | Cancel in-flight request |
 
 ---
 
-## 🔌 MCP Tools Reference (20 tools)
+## 🔌 MCP Tools Reference (25 tools)
 
 ### Database Tools
 
@@ -384,7 +331,7 @@ Tests use mocked Motor clients — no live MongoDB or Ollama required.
 
 **Test coverage:**
 
-- MCP server: all 20 tools tested
+- MCP server tool behavior with mocked Motor clients
 
 ---
 
@@ -399,11 +346,13 @@ Tests use mocked Motor clients — no live MongoDB or Ollama required.
 | `pymongo`           | ≥4.16.0 | MongoDB sync operations             |
 | `ollama`            | ≥0.6.1  | LLM client (local + cloud)          |
 | `rich`              | ≥13.0.0 | Terminal UI + markdown rendering    |
-| `prompt-toolkit`    | ≥3.0.0  | History + autocomplete              |
+| `textual`           | ≥0.80.0 | Full-screen terminal UI             |
+| `prompt-toolkit`    | ≥3.0.0  | Legacy REPL utilities               |
 | `python-dotenv`     | ≥1.0.0  | .env config loading                 |
 | `pydantic`          | ≥2.0.0  | Data validation                     |
 | `pydantic-settings` | ≥2.0.0  | Settings from environment           |
-| `pypdf`             | ≥4.0.0  | PDF text extraction for doc loading |
+| `numpy`             | ≥1.26.0 | RAG vector utilities                |
+| `pypdf`             | ≥4.0.0  | PDF text extraction for RAG helpers |
 
 ### Dev / Test (`requirements-dev.txt`)
 

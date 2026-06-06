@@ -61,8 +61,21 @@ class Settings(BaseSettings):
         description="Print tool call arguments in the terminal alongside tool names",
     )
 
+    # -- RAG -------------------------------------------------------------------
+    embed_model: str = Field(
+        default="nomic-embed-text",
+        description="Ollama embedding model used for RAG doc indexing",
+    )
+
     # -- Logging ---------------------------------------------------------------
     log_level: str = Field(default="INFO", description="Python logging level")
+    audit_log_enabled: bool = Field(
+        default=True,
+        description=(
+            "Write a structured JSON audit trail of every MCP tool call "
+            "to logs/audit.log. Set to false to disable."
+        ),
+    )
 
     model_config = {
         "env_file": ".env",
@@ -82,8 +95,8 @@ from logging.handlers import RotatingFileHandler as _RFH  # noqa: E402
 
 _file_handler = _RFH(
     _LOG_DIR / "app.log",
-    maxBytes=5 * 1024 * 1024,   # 5 MB per file
-    backupCount=3,               # keep app.log, app.log.1, app.log.2, app.log.3
+    maxBytes=5 * 1024 * 1024,  # 5 MB per file
+    backupCount=3,  # keep app.log, app.log.1, app.log.2, app.log.3
     encoding="utf-8",
 )
 _file_handler.setFormatter(

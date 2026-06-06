@@ -65,15 +65,17 @@ _HISTORY_FILE = Path(__file__).parent.parent / ".query_history"
 
 # ── Slash-commands available in the REPL ─────────────────────────────────────
 SLASH_COMMANDS: dict[str, str] = {
-    "/clear":   "Clear the terminal screen and scroll-back buffer",
-    "/help":    "Show this help message",
-    "/tools":   "List all available MCP tools",
-    "/reset":   "Clear conversation history",
+    "/clear": "Clear the terminal screen and scroll-back buffer",
+    "/help": "Show this help message",
+    "/models": "List installed Ollama models and switch active model",
+    "/tools": "List all available MCP tools",
+    "/reset": "Clear conversation history",
     "/history": "Show recent query history",
-    "/model":   "Show current model info",
-    "/exit":    "Exit the program",
-    "/quit":    "Exit the program",
+    "/model": "Show current model info",
+    "/exit": "Exit the program",
+    "/quit": "Exit the program",
 }
+
 
 # ── System prompt ────────────────────────────────────────────────────────────
 def _parse_args(raw: Any) -> dict[str, Any]:
@@ -99,6 +101,7 @@ def _parse_args(raw: Any) -> dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {}
     except (json.JSONDecodeError, TypeError):
         return {}
+
 
 SYSTEM_PROMPT = """You are an expert MongoDB database administrator.
 You have full control over a MongoDB instance via MCP tools.
@@ -157,9 +160,9 @@ class MongoDBMCPClient:
         self._on_clear = on_clear
 
         self._tools: list[dict] = []
-        self._tool_descriptions: dict[str, str] = {}   # name → short description
+        self._tool_descriptions: dict[str, str] = {}  # name → short description
         self._mcp_tool_names: set[str] = set()
-        self._history: list[dict] = []                 # conversation turns
+        self._history: list[dict] = []  # conversation turns
 
         # prompt-toolkit session with persistent history
         self._pt_session: PromptSession = PromptSession(
@@ -231,7 +234,9 @@ class MongoDBMCPClient:
             result = await mcp_client.call_tool(tool_name, arguments)
             # fastmcp >= 2.x wraps results in CallToolResult; .content is the list
             content = getattr(result, "content", result)
-            parts = [item.text if hasattr(item, "text") else str(item) for item in content]
+            parts = [
+                item.text if hasattr(item, "text") else str(item) for item in content
+            ]
             return "\n".join(parts)
         except Exception as exc:
             logger.exception("Tool %s raised an exception", tool_name)
@@ -254,7 +259,10 @@ class MongoDBMCPClient:
         if self.show_tool_args and arguments:
             # Pretty-print args — truncate very long values
             args_str = json.dumps(
-                {k: (v if len(str(v)) < 80 else str(v)[:77] + "…") for k, v in arguments.items()},
+                {
+                    k: (v if len(str(v)) < 80 else str(v)[:77] + "…")
+                    for k, v in arguments.items()
+                },
                 indent=2,
             )
             console.print(
@@ -368,12 +376,12 @@ class MongoDBMCPClient:
                 with console.status(
                     f"[dim]Running [cyan]{tool_name}[/cyan]…[/dim]", spinner="dots"
                 ):
-                    tool_result = await self._call_tool(mcp_client, tool_name, tool_args)
+                    tool_result = await self._call_tool(
+                        mcp_client, tool_name, tool_args
+                    )
                 elapsed = time.perf_counter() - t0
 
-                console.print(
-                    f"  [dim]✓ done in {elapsed:.2f}s[/dim]"
-                )
+                console.print(f"  [dim]✓ done in {elapsed:.2f}s[/dim]")
 
                 messages.append({"role": "tool", "content": tool_result})
 
@@ -413,12 +421,103 @@ class MongoDBMCPClient:
         info = Table.grid(padding=(0, 2))
         info.add_column(style="bold dim")
         info.add_column(style="cyan")
-        info.add_row("Model",     self.model)
-        info.add_row("MongoDB",   settings.mongodb_uri)
+        info.add_row("Model", self.model)
+        info.add_row("MongoDB", settings.mongodb_uri)
         info.add_row("Default DB", settings.mongodb_default_db)
-        info.add_row("Tools",     str(len(self._tools)))
+        info.add_row("Tools", str(len(self._tools)))
         info.add_row("Show args", str(self.show_tool_args))
-        console.print(Panel(info, title="[bold]Session Info[/bold]", border_style="dim"))
+        console.print(
+            Panel(info, title="[bold]Session Info[/bold]", border_style="dim")
+        )
+
+    def _cmd_models(self) -> None:
+        """List all locally installed Ollama models and let the user switch.
+
+        Fetches the model list from the Ollama daemon, renders a numbered
+        table, and updates ``self.model`` if the user picks a different one.
+        The conversation history is preserved; only the model changes.
+        """
+        try:
+            response = ollama.list()
+            models = sorted(
+                response.models if hasattr(response, "models") else [],
+                key=lambda m: str(getattr(m, "model", m)),
+            )
+        except Exception as exc:
+            console.print(
+                f"[yellow]⚠  Could not reach Ollama: {exc}\n"
+                f"   Make sure Ollama is running: [bold]ollama serve[/bold][/yellow]\n"
+            )
+            return
+
+        if not models:
+            console.print(
+                "[yellow]⚠  No models installed. "
+                "Run [bold]ollama pull <model>[/bold].[/yellow]\n"
+            )
+            return
+
+        def _fmt_size(m) -> str:
+            size = getattr(m, "size", None)
+            if size is None:
+                return "—"
+            gb = size / (1024**3)
+            return f"{gb:.1f} GB" if gb >= 1 else f"{size / (1024**2):.0f} MB"
+
+        table = Table(
+            title="Installed Ollama Models",
+            border_style="cyan",
+            show_lines=False,
+            padding=(0, 1),
+        )
+        table.add_column("#", style="bold dim", width=4, justify="right")
+        table.add_column("Model", style="bold cyan", no_wrap=True)
+        table.add_column("Size", style="dim", width=10, justify="right")
+        table.add_column("", style="bold green", width=8)
+
+        for i, m in enumerate(models, 1):
+            name = str(getattr(m, "model", m))
+            active = "◀ active" if name == self.model else ""
+            table.add_row(str(i), name, _fmt_size(m), active)
+
+        console.print()
+        console.print(table)
+        console.print(
+            f"\n[dim]Current model: [/dim][cyan]{self.model}[/cyan]"
+            "[dim] — enter a number to switch, or press Enter to keep it.[/dim]\n"
+        )
+
+        while True:
+            try:
+                raw = input("  Select model › ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]Model unchanged.[/dim]\n")
+                return
+
+            if not raw:
+                console.print(f"[dim]Keeping [cyan]{self.model}[/cyan].[/dim]\n")
+                return
+
+            if raw.isdigit():
+                idx = int(raw) - 1
+                if 0 <= idx < len(models):
+                    chosen = str(getattr(models[idx], "model", models[idx]))
+                    if chosen == self.model:
+                        console.print(
+                            f"[dim]Already using [cyan]{chosen}[/cyan].[/dim]\n"
+                        )
+                    else:
+                        self.model = chosen
+                        console.print(
+                            f"[green]✓[/green] Switched to "
+                            f"[bold cyan]{chosen}[/bold cyan]"
+                            "[dim] — next query will use this model.[/dim]\n"
+                        )
+                    return
+
+            console.print(
+                f"  [yellow]Invalid — enter a number between 1 and {len(models)}.[/yellow]"
+            )
 
     def _cmd_history(self) -> None:
         """Print recent conversation turns."""
@@ -427,7 +526,10 @@ class MongoDBMCPClient:
             return
         for turn in self._history[-10:]:
             role_style = "bold yellow" if turn["role"] == "user" else "bold green"
-            console.print(f"[{role_style}]{turn['role'].upper()}[/{role_style}]", turn["content"][:200])
+            console.print(
+                f"[{role_style}]{turn['role'].upper()}[/{role_style}]",
+                turn["content"][:200],
+            )
 
     def _cmd_clear(self) -> None:
         """Clear the terminal screen and scroll-back buffer, then reprint the header."""
@@ -436,6 +538,7 @@ class MongoDBMCPClient:
         else:
             # Fallback: ANSI escape to clear screen + scroll-back
             import os
+
             os.system("printf '\033[H\033[2J\033[3J'" if os.name != "nt" else "cls")
         # Reprint a compact header so context is not completely lost
         console.print(
@@ -481,11 +584,19 @@ class MongoDBMCPClient:
             Panel.fit(
                 Text.assemble(
                     ("🍃 MongoDB MCP Controller\n", "bold green"),
-                    ("Model   : ", "dim"), (self.model, "cyan"), ("\n", ""),
-                    ("MongoDB : ", "dim"), (settings.mongodb_uri, "cyan"), ("\n", ""),
-                    ("\nType ", "dim"), ("/help", "bold cyan"), (" for commands  |  ", "dim"),
-                    ("↑↓", "bold cyan"), (" history  |  ", "dim"),
-                    ("Ctrl-C", "bold cyan"), (" to exit", "dim"),
+                    ("Model   : ", "dim"),
+                    (self.model, "cyan"),
+                    ("\n", ""),
+                    ("MongoDB : ", "dim"),
+                    (settings.mongodb_uri, "cyan"),
+                    ("\n", ""),
+                    ("\nType ", "dim"),
+                    ("/help", "bold cyan"),
+                    (" for commands  |  ", "dim"),
+                    ("↑↓", "bold cyan"),
+                    (" history  |  ", "dim"),
+                    ("Ctrl-C", "bold cyan"),
+                    (" to exit", "dim"),
                 ),
                 border_style="green",
             )
@@ -500,9 +611,7 @@ class MongoDBMCPClient:
             with console.status("[dim]Connecting to MCP server…[/dim]", spinner="dots"):
                 await self._discover_tools(mcp_client)
 
-            console.print(
-                f"[dim]✓ Connected — {len(self._tools)} tools ready.[/dim]\n"
-            )
+            console.print(f"[dim]✓ Connected — {len(self._tools)} tools ready.[/dim]\n")
 
             # ── REPL loop ─────────────────────────────────────────────────
             while True:
@@ -526,6 +635,9 @@ class MongoDBMCPClient:
                         break
                     case "/help":
                         self._cmd_help()
+                        continue
+                    case "/models":
+                        self._cmd_models()
                         continue
                     case "/tools":
                         self._cmd_tools()

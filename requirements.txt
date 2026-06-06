@@ -22,6 +22,10 @@ ollama>=0.6.1          # local + cloud model support
 # ── Terminal UI ───────────────────────────────────────────────────
 rich>=13.0.0           # colored output, panels, tables, markdown
 prompt-toolkit>=3.0.0  # command history, autocomplete, async prompt
+textual>=0.80.0        # full-screen TUI framework (Claude Code-style)
+
+# ── RAG / Embeddings ──────────────────────────────────────────────
+numpy>=1.26.0          # cosine similarity for in-memory vector search
 
 # ── Configuration ─────────────────────────────────────────────────
 pypdf>=4.0.0          # PDF text extraction for doc loading

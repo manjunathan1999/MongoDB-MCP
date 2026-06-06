@@ -21,6 +21,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import json
 import logging
+import time
 from typing import Any
 
 import motor.motor_asyncio
@@ -28,6 +29,7 @@ from fastmcp import FastMCP
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 
+from config.audit_logger import audit_tool_call
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,40 @@ def _serialize(doc: Any) -> Any:
 
 
 # ════════════════════════════════════════════════════════════════════════════
+#  AUDIT HELPER
+# ════════════════════════════════════════════════════════════════════════════
+
+async def _run_tool(tool_name: str, arguments: dict[str, Any], coro) -> str:
+    """Execute *coro* and write one audit record when it completes.
+
+    All tool functions call this instead of doing their work directly so
+    timing and audit-logging are handled in exactly one place.
+
+    Args:
+        tool_name:  The MCP tool name (used as the ``tool`` field in the log).
+        arguments:  Dict of kwargs passed to the tool (logged after sanitisation).
+        coro:       Awaitable that performs the actual MongoDB work and returns
+                    a JSON string.
+
+    Returns:
+        The JSON string returned by *coro*, unchanged.
+    """
+    t0 = time.perf_counter()
+    result: str = await coro
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+    if settings.audit_log_enabled:
+        await audit_tool_call(
+            tool=tool_name,
+            arguments=arguments,
+            result_json=result,
+            elapsed_ms=elapsed_ms,
+        )
+
+    return result
+
+
+# ════════════════════════════════════════════════════════════════════════════
 #  DATABASE-LEVEL TOOLS
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -112,13 +148,16 @@ async def list_databases() -> str:
     Returns:
         JSON string — list of database descriptors.
     """
-    try:
-        result = await _get_client().list_databases()
-        dbs = [_serialize(db) async for db in result]
-        return json.dumps(dbs, indent=2)
-    except PyMongoError as exc:
-        logger.exception("list_databases failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            result = await _get_client().list_databases()
+            dbs = [_serialize(db) async for db in result]
+            return json.dumps(dbs, indent=2)
+        except PyMongoError as exc:
+            logger.exception("list_databases failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool("list_databases", {}, _work())
 
 
 @mcp.tool(
@@ -137,13 +176,16 @@ async def drop_database(db_name: str) -> str:
     Returns:
         JSON confirmation or error.
     """
-    try:
-        await _get_client().drop_database(db_name)
-        logger.warning("Dropped database: %s", db_name)
-        return json.dumps({"dropped": db_name})
-    except PyMongoError as exc:
-        logger.exception("drop_database failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            await _get_client().drop_database(db_name)
+            logger.warning("Dropped database: %s", db_name)
+            return json.dumps({"dropped": db_name})
+        except PyMongoError as exc:
+            logger.exception("drop_database failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool("drop_database", {"db_name": db_name}, _work())
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -166,12 +208,15 @@ async def list_collections(db_name: str | None = None) -> str:
     Returns:
         JSON array of collection names.
     """
-    try:
-        names = await _db(db_name).list_collection_names()
-        return json.dumps(names)
-    except PyMongoError as exc:
-        logger.exception("list_collections failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            names = await _db(db_name).list_collection_names()
+            return json.dumps(names)
+        except PyMongoError as exc:
+            logger.exception("list_collections failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool("list_collections", {"db_name": db_name}, _work())
 
 
 @mcp.tool(
@@ -195,13 +240,20 @@ async def create_collection(
     Returns:
         JSON confirmation or error.
     """
-    try:
-        opts: dict = json.loads(options)
-        await _db(db_name).create_collection(collection_name, **opts)
-        return json.dumps({"created": collection_name, "db": db_name or settings.mongodb_default_db})
-    except PyMongoError as exc:
-        logger.exception("create_collection failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            opts: dict = json.loads(options)
+            await _db(db_name).create_collection(collection_name, **opts)
+            return json.dumps({"created": collection_name, "db": db_name or settings.mongodb_default_db})
+        except PyMongoError as exc:
+            logger.exception("create_collection failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "create_collection",
+        {"collection_name": collection_name, "db_name": db_name, "options": options},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -224,13 +276,20 @@ async def drop_collection(
     Returns:
         JSON confirmation or error.
     """
-    try:
-        await _db(db_name).drop_collection(collection_name)
-        logger.warning("Dropped collection %s.%s", db_name, collection_name)
-        return json.dumps({"dropped": collection_name})
-    except PyMongoError as exc:
-        logger.exception("drop_collection failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            await _db(db_name).drop_collection(collection_name)
+            logger.warning("Dropped collection %s.%s", db_name, collection_name)
+            return json.dumps({"dropped": collection_name})
+        except PyMongoError as exc:
+            logger.exception("drop_collection failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "drop_collection",
+        {"collection_name": collection_name, "db_name": db_name},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -254,12 +313,19 @@ async def rename_collection(
     Returns:
         JSON confirmation or error.
     """
-    try:
-        await _db(db_name)[old_name].rename(new_name)
-        return json.dumps({"renamed": {"from": old_name, "to": new_name}})
-    except PyMongoError as exc:
-        logger.exception("rename_collection failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            await _db(db_name)[old_name].rename(new_name)
+            return json.dumps({"renamed": {"from": old_name, "to": new_name}})
+        except PyMongoError as exc:
+            logger.exception("rename_collection failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "rename_collection",
+        {"old_name": old_name, "new_name": new_name, "db_name": db_name},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -281,12 +347,19 @@ async def collection_stats(
     Returns:
         JSON stats object or error.
     """
-    try:
-        stats = await _db(db_name).command("collStats", collection_name)
-        return json.dumps(_serialize(stats), indent=2)
-    except PyMongoError as exc:
-        logger.exception("collection_stats failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            stats = await _db(db_name).command("collStats", collection_name)
+            return json.dumps(_serialize(stats), indent=2)
+        except PyMongoError as exc:
+            logger.exception("collection_stats failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "collection_stats",
+        {"collection_name": collection_name, "db_name": db_name},
+        _work(),
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -315,13 +388,20 @@ async def insert_one(
     Returns:
         JSON with the inserted_id or error.
     """
-    try:
-        doc: dict = json.loads(document)
-        result = await _db(db_name)[collection_name].insert_one(doc)
-        return json.dumps({"inserted_id": str(result.inserted_id)})
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("insert_one failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            doc: dict = json.loads(document)
+            result = await _db(db_name)[collection_name].insert_one(doc)
+            return json.dumps({"inserted_id": str(result.inserted_id)})
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("insert_one failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "insert_one",
+        {"collection_name": collection_name, "db_name": db_name, "document": document},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -345,14 +425,21 @@ async def insert_many(
     Returns:
         JSON with list of inserted_ids or error.
     """
-    try:
-        docs: list[dict] = json.loads(documents)
-        result = await _db(db_name)[collection_name].insert_many(docs)
-        ids = [str(i) for i in result.inserted_ids]
-        return json.dumps({"inserted_ids": ids, "count": len(ids)})
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("insert_many failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            docs: list[dict] = json.loads(documents)
+            result = await _db(db_name)[collection_name].insert_many(docs)
+            ids = [str(i) for i in result.inserted_ids]
+            return json.dumps({"inserted_ids": ids, "count": len(ids)})
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("insert_many failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "insert_many",
+        {"collection_name": collection_name, "db_name": db_name, "documents": documents},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -385,23 +472,38 @@ async def find_documents(
     Returns:
         JSON array of matching documents.
     """
-    try:
-        flt: dict = json.loads(filter)
-        proj: dict | None = json.loads(projection) if projection else None
-        cursor = _db(db_name)[collection_name].find(flt, proj)
+    async def _work() -> str:
+        try:
+            flt: dict = json.loads(filter)
+            proj: dict | None = json.loads(projection) if projection else None
+            cursor = _db(db_name)[collection_name].find(flt, proj)
 
-        if sort:
-            sort_pairs = json.loads(sort)
-            cursor = cursor.sort(
-                [(k, ASCENDING if v >= 0 else DESCENDING) for k, v in sort_pairs]
-            )
+            if sort:
+                sort_pairs = json.loads(sort)
+                cursor = cursor.sort(
+                    [(k, ASCENDING if v >= 0 else DESCENDING) for k, v in sort_pairs]
+                )
 
-        cursor = cursor.skip(skip).limit(limit)
-        docs = [_serialize(d) async for d in cursor]
-        return json.dumps(docs, indent=2)
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("find_documents failed")
-        return json.dumps({"error": str(exc)})
+            cursor = cursor.skip(skip).limit(limit)
+            docs = [_serialize(d) async for d in cursor]
+            return json.dumps(docs, indent=2)
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("find_documents failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "find_documents",
+        {
+            "collection_name": collection_name,
+            "db_name": db_name,
+            "filter": filter,
+            "projection": projection,
+            "sort": sort,
+            "skip": skip,
+            "limit": limit,
+        },
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -425,13 +527,20 @@ async def find_one(
     Returns:
         JSON document or ``{"result": null}`` if not found.
     """
-    try:
-        flt: dict = json.loads(filter)
-        doc = await _db(db_name)[collection_name].find_one(flt)
-        return json.dumps(_serialize(doc) if doc else {"result": None}, indent=2)
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("find_one failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            flt: dict = json.loads(filter)
+            doc = await _db(db_name)[collection_name].find_one(flt)
+            return json.dumps(_serialize(doc) if doc else {"result": None}, indent=2)
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("find_one failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "find_one",
+        {"collection_name": collection_name, "db_name": db_name, "filter": filter},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -455,13 +564,20 @@ async def count_documents(
     Returns:
         JSON with ``count`` field.
     """
-    try:
-        flt: dict = json.loads(filter)
-        n = await _db(db_name)[collection_name].count_documents(flt)
-        return json.dumps({"count": n})
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("count_documents failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            flt: dict = json.loads(filter)
+            n = await _db(db_name)[collection_name].count_documents(flt)
+            return json.dumps({"count": n})
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("count_documents failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "count_documents",
+        {"collection_name": collection_name, "db_name": db_name, "filter": filter},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -490,20 +606,33 @@ async def update_one(
     Returns:
         JSON with matched_count and modified_count.
     """
-    try:
-        result = await _db(db_name)[collection_name].update_one(
-            json.loads(filter), json.loads(update), upsert=upsert
-        )
-        return json.dumps(
-            {
-                "matched_count": result.matched_count,
-                "modified_count": result.modified_count,
-                "upserted_id": str(result.upserted_id) if result.upserted_id else None,
-            }
-        )
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("update_one failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            result = await _db(db_name)[collection_name].update_one(
+                json.loads(filter), json.loads(update), upsert=upsert
+            )
+            return json.dumps(
+                {
+                    "matched_count": result.matched_count,
+                    "modified_count": result.modified_count,
+                    "upserted_id": str(result.upserted_id) if result.upserted_id else None,
+                }
+            )
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("update_one failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "update_one",
+        {
+            "collection_name": collection_name,
+            "db_name": db_name,
+            "filter": filter,
+            "update": update,
+            "upsert": upsert,
+        },
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -532,19 +661,32 @@ async def update_many(
     Returns:
         JSON with matched_count and modified_count.
     """
-    try:
-        result = await _db(db_name)[collection_name].update_many(
-            json.loads(filter), json.loads(update), upsert=upsert
-        )
-        return json.dumps(
-            {
-                "matched_count": result.matched_count,
-                "modified_count": result.modified_count,
-            }
-        )
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("update_many failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            result = await _db(db_name)[collection_name].update_many(
+                json.loads(filter), json.loads(update), upsert=upsert
+            )
+            return json.dumps(
+                {
+                    "matched_count": result.matched_count,
+                    "modified_count": result.modified_count,
+                }
+            )
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("update_many failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "update_many",
+        {
+            "collection_name": collection_name,
+            "db_name": db_name,
+            "filter": filter,
+            "update": update,
+            "upsert": upsert,
+        },
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -573,20 +715,33 @@ async def replace_one(
     Returns:
         JSON with matched_count and modified_count.
     """
-    try:
-        result = await _db(db_name)[collection_name].replace_one(
-            json.loads(filter), json.loads(replacement), upsert=upsert
-        )
-        return json.dumps(
-            {
-                "matched_count": result.matched_count,
-                "modified_count": result.modified_count,
-                "upserted_id": str(result.upserted_id) if result.upserted_id else None,
-            }
-        )
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("replace_one failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            result = await _db(db_name)[collection_name].replace_one(
+                json.loads(filter), json.loads(replacement), upsert=upsert
+            )
+            return json.dumps(
+                {
+                    "matched_count": result.matched_count,
+                    "modified_count": result.modified_count,
+                    "upserted_id": str(result.upserted_id) if result.upserted_id else None,
+                }
+            )
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("replace_one failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "replace_one",
+        {
+            "collection_name": collection_name,
+            "db_name": db_name,
+            "filter": filter,
+            "replacement": replacement,
+            "upsert": upsert,
+        },
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -611,12 +766,19 @@ async def delete_one(
     Returns:
         JSON with deleted_count.
     """
-    try:
-        result = await _db(db_name)[collection_name].delete_one(json.loads(filter))
-        return json.dumps({"deleted_count": result.deleted_count})
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("delete_one failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            result = await _db(db_name)[collection_name].delete_one(json.loads(filter))
+            return json.dumps({"deleted_count": result.deleted_count})
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("delete_one failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "delete_one",
+        {"collection_name": collection_name, "db_name": db_name, "filter": filter},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -641,15 +803,22 @@ async def delete_many(
     Returns:
         JSON with deleted_count.
     """
-    try:
-        result = await _db(db_name)[collection_name].delete_many(json.loads(filter))
-        logger.warning(
-            "delete_many: removed %d docs from %s", result.deleted_count, collection_name
-        )
-        return json.dumps({"deleted_count": result.deleted_count})
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("delete_many failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            result = await _db(db_name)[collection_name].delete_many(json.loads(filter))
+            logger.warning(
+                "delete_many: removed %d docs from %s", result.deleted_count, collection_name
+            )
+            return json.dumps({"deleted_count": result.deleted_count})
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("delete_many failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "delete_many",
+        {"collection_name": collection_name, "db_name": db_name, "filter": filter},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -680,16 +849,29 @@ async def find_one_and_update(
     """
     from pymongo import ReturnDocument
 
-    try:
-        doc = await _db(db_name)[collection_name].find_one_and_update(
-            json.loads(filter),
-            json.loads(update),
-            return_document=ReturnDocument.AFTER if return_updated else ReturnDocument.BEFORE,
-        )
-        return json.dumps(_serialize(doc) if doc else {"result": None}, indent=2)
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("find_one_and_update failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            doc = await _db(db_name)[collection_name].find_one_and_update(
+                json.loads(filter),
+                json.loads(update),
+                return_document=ReturnDocument.AFTER if return_updated else ReturnDocument.BEFORE,
+            )
+            return json.dumps(_serialize(doc) if doc else {"result": None}, indent=2)
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("find_one_and_update failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "find_one_and_update",
+        {
+            "collection_name": collection_name,
+            "db_name": db_name,
+            "filter": filter,
+            "update": update,
+            "return_updated": return_updated,
+        },
+        _work(),
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -720,14 +902,21 @@ async def aggregate(
     Returns:
         JSON array of result documents.
     """
-    try:
-        stages: list = json.loads(pipeline)
-        cursor = _db(db_name)[collection_name].aggregate(stages)
-        results = [_serialize(doc) async for doc in cursor]
-        return json.dumps(results, indent=2)
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("aggregate failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            stages: list = json.loads(pipeline)
+            cursor = _db(db_name)[collection_name].aggregate(stages)
+            results = [_serialize(doc) async for doc in cursor]
+            return json.dumps(results, indent=2)
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("aggregate failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "aggregate",
+        {"collection_name": collection_name, "db_name": db_name, "pipeline": pipeline},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -753,12 +942,19 @@ async def distinct(
     Returns:
         JSON array of distinct values.
     """
-    try:
-        values = await _db(db_name)[collection_name].distinct(field, json.loads(filter))
-        return json.dumps(_serialize(values), indent=2)
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("distinct failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            values = await _db(db_name)[collection_name].distinct(field, json.loads(filter))
+            return json.dumps(_serialize(values), indent=2)
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("distinct failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "distinct",
+        {"collection_name": collection_name, "field": field, "db_name": db_name, "filter": filter},
+        _work(),
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -785,14 +981,21 @@ async def list_indexes(
     Returns:
         JSON array of index info objects.
     """
-    try:
-        indexes = []
-        async for idx in _db(db_name)[collection_name].list_indexes():
-            indexes.append(_serialize(dict(idx)))
-        return json.dumps(indexes, indent=2)
-    except PyMongoError as exc:
-        logger.exception("list_indexes failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            indexes = []
+            async for idx in _db(db_name)[collection_name].list_indexes():
+                indexes.append(_serialize(dict(idx)))
+            return json.dumps(indexes, indent=2)
+        except PyMongoError as exc:
+            logger.exception("list_indexes failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "list_indexes",
+        {"collection_name": collection_name, "db_name": db_name},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -824,17 +1027,31 @@ async def create_index(
     Returns:
         JSON with the created index name.
     """
-    try:
-        key_list = json.loads(keys)
-        idx_keys = [(k, ASCENDING if v >= 0 else DESCENDING) for k, v in key_list]
-        opts: dict[str, Any] = {"unique": unique, "sparse": sparse}
-        if name:
-            opts["name"] = name
-        idx_name = await _db(db_name)[collection_name].create_index(idx_keys, **opts)
-        return json.dumps({"index_created": idx_name})
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("create_index failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            key_list = json.loads(keys)
+            idx_keys = [(k, ASCENDING if v >= 0 else DESCENDING) for k, v in key_list]
+            opts: dict[str, Any] = {"unique": unique, "sparse": sparse}
+            if name:
+                opts["name"] = name
+            idx_name = await _db(db_name)[collection_name].create_index(idx_keys, **opts)
+            return json.dumps({"index_created": idx_name})
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("create_index failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "create_index",
+        {
+            "collection_name": collection_name,
+            "db_name": db_name,
+            "keys": keys,
+            "unique": unique,
+            "sparse": sparse,
+            "name": name,
+        },
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -858,12 +1075,19 @@ async def drop_index(
     Returns:
         JSON confirmation or error.
     """
-    try:
-        await _db(db_name)[collection_name].drop_index(index_name)
-        return json.dumps({"dropped_index": index_name})
-    except PyMongoError as exc:
-        logger.exception("drop_index failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            await _db(db_name)[collection_name].drop_index(index_name)
+            return json.dumps({"dropped_index": index_name})
+        except PyMongoError as exc:
+            logger.exception("drop_index failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "drop_index",
+        {"collection_name": collection_name, "index_name": index_name, "db_name": db_name},
+        _work(),
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -891,13 +1115,20 @@ async def run_command(
     Returns:
         JSON response from MongoDB.
     """
-    try:
-        cmd: dict = json.loads(command)
-        result = await _db(db_name).command(cmd)
-        return json.dumps(_serialize(result), indent=2)
-    except (PyMongoError, json.JSONDecodeError) as exc:
-        logger.exception("run_command failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            cmd: dict = json.loads(command)
+            result = await _db(db_name).command(cmd)
+            return json.dumps(_serialize(result), indent=2)
+        except (PyMongoError, json.JSONDecodeError) as exc:
+            logger.exception("run_command failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "run_command",
+        {"command": command, "db_name": db_name},
+        _work(),
+    )
 
 
 @mcp.tool(
@@ -909,19 +1140,22 @@ async def ping_server() -> str:
     Returns:
         JSON with ok status and server build info.
     """
-    try:
-        ping = await _db("admin").command("ping")
-        info = await _db("admin").command("buildInfo")
-        return json.dumps(
-            {
-                "ok": ping.get("ok") == 1,
-                "version": info.get("version"),
-                "gitVersion": info.get("gitVersion"),
-            }
-        )
-    except PyMongoError as exc:
-        logger.exception("ping_server failed")
-        return json.dumps({"error": str(exc)})
+    async def _work() -> str:
+        try:
+            ping = await _db("admin").command("ping")
+            info = await _db("admin").command("buildInfo")
+            return json.dumps(
+                {
+                    "ok": ping.get("ok") == 1,
+                    "version": info.get("version"),
+                    "gitVersion": info.get("gitVersion"),
+                }
+            )
+        except PyMongoError as exc:
+            logger.exception("ping_server failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool("ping_server", {}, _work())
 
 
 @mcp.tool(
@@ -958,41 +1192,53 @@ async def bulk_write(
         UpdateOne,
     )
 
-    try:
-        ops_raw: list[dict] = json.loads(operations)
-        requests = []
-        for op in ops_raw:
-            match op["type"]:
-                case "insert":
-                    requests.append(InsertOne(op["document"]))
-                case "update_one":
-                    requests.append(
-                        UpdateOne(op["filter"], op["update"], upsert=op.get("upsert", False))
-                    )
-                case "update_many":
-                    requests.append(
-                        UpdateMany(op["filter"], op["update"], upsert=op.get("upsert", False))
-                    )
-                case "delete_one":
-                    requests.append(DeleteOne(op["filter"]))
-                case "delete_many":
-                    requests.append(DeleteMany(op["filter"]))
-                case _:
-                    return json.dumps({"error": f"Unknown operation type: {op['type']}"})
+    async def _work() -> str:
+        try:
+            ops_raw: list[dict] = json.loads(operations)
+            requests = []
+            for op in ops_raw:
+                match op["type"]:
+                    case "insert":
+                        requests.append(InsertOne(op["document"]))
+                    case "update_one":
+                        requests.append(
+                            UpdateOne(op["filter"], op["update"], upsert=op.get("upsert", False))
+                        )
+                    case "update_many":
+                        requests.append(
+                            UpdateMany(op["filter"], op["update"], upsert=op.get("upsert", False))
+                        )
+                    case "delete_one":
+                        requests.append(DeleteOne(op["filter"]))
+                    case "delete_many":
+                        requests.append(DeleteMany(op["filter"]))
+                    case _:
+                        return json.dumps({"error": f"Unknown operation type: {op['type']}"})
 
-        result = await _db(db_name)[collection_name].bulk_write(requests, ordered=ordered)
-        return json.dumps(
-            {
-                "inserted_count": result.inserted_count,
-                "matched_count": result.matched_count,
-                "modified_count": result.modified_count,
-                "deleted_count": result.deleted_count,
-                "upserted_count": result.upserted_count,
-            }
-        )
-    except (PyMongoError, json.JSONDecodeError, KeyError) as exc:
-        logger.exception("bulk_write failed")
-        return json.dumps({"error": str(exc)})
+            result = await _db(db_name)[collection_name].bulk_write(requests, ordered=ordered)
+            return json.dumps(
+                {
+                    "inserted_count": result.inserted_count,
+                    "matched_count": result.matched_count,
+                    "modified_count": result.modified_count,
+                    "deleted_count": result.deleted_count,
+                    "upserted_count": result.upserted_count,
+                }
+            )
+        except (PyMongoError, json.JSONDecodeError, KeyError) as exc:
+            logger.exception("bulk_write failed")
+            return json.dumps({"error": str(exc)})
+
+    return await _run_tool(
+        "bulk_write",
+        {
+            "collection_name": collection_name,
+            "db_name": db_name,
+            "operations": operations,
+            "ordered": ordered,
+        },
+        _work(),
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════

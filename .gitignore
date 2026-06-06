@@ -4,3 +4,6 @@
 /logs
 /reports
 /tests
+/FUTURE_ENHANCEMENTS.md
+.venv
+*__pycache__
