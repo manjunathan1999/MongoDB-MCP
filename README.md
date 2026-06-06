@@ -387,7 +387,19 @@ Use this project as a MongoDB MCP server from Claude Desktop, Cursor, or any MCP
   }
 }
 ```
+---
 
+<div align="center">
+
+### 🚀 This Is Just the Beginning
+
+Keep building, keep learning, and keep pushing boundaries. Every project is another step toward mastering your craft.
+
+⭐ If you found this project useful, consider giving it a star.
+
+</div>
+
+---
 ---
 
 ## 📄 License
