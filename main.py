@@ -56,7 +56,9 @@ def main() -> None:
         mcp.run(transport="stdio")
         return
 
-    model: str = args.model or settings.ollama_model
+    # If --model is explicitly provided, use it directly (skip startup picker)
+    # If not provided, pass None so the TUI shows the model selector
+    model: str | None = args.model
     show_args: bool = args.show_tool_args or settings.show_tool_args
 
     from tui.app import MongoTUIApp
