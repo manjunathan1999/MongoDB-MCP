@@ -77,6 +77,25 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- Safety ----------------------------------------------------------------
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "When True, all destructive tools (drop_*, delete_*, update_*, "
+            "replace_one, bulk_write, insert_*) are disabled at the MCP server level. "
+            "Only read operations (find, count, list, aggregate, distinct) are allowed."
+        ),
+    )
+    confirm_destructive: bool = Field(
+        default=True,
+        description=(
+            "When True, highly destructive operations (drop_database, drop_collection, "
+            "delete_many) require a confirmation token to execute. The tool will return "
+            "a confirmation prompt on first call; the caller must re-invoke with the "
+            "confirm=true parameter to proceed."
+        ),
+    )
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
